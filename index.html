@@ -70,7 +70,11 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
   };
 
   // ================= 2. PALETTE =================
-  const W = 480, H = 800;
+  // On tall phones the world grows taller (up to 1040) so the game fills the screen instead of leaving black bars;
+  // menus are centred with OY. Desktop and wider screens keep 480 x 800.
+  const W = 480, H = (() => { const r = window.innerHeight / Math.max(1, window.innerWidth); return window.innerWidth < 700 && r > 1.75 ? Math.min(1040, Math.round(480 * r)) : 800; })(), OY = (H - 800) / 2;
+  // Sprites draw larger than their pixel-art frames so they read on phones; hitboxes are divided by the same factor so balance is unchanged.
+  const SPR = 1.6, BOSS_SPR = 1.3;
   const C = { sky: 0x0b0d1f, red: 0xff4d3d, cream: 0xf3ecdc, cyan: 0x5fe3ff, lime: 0xb8ff5f, violet: 0xb48cff, gold: 0xffc857, ember: 0xff8a3d };
   const FONT = "'Chakra Petch', sans-serif", MONO = "'IBM Plex Mono', monospace";
   const BOSS = 9, DIVER = 4; // enemy type ids
@@ -166,7 +170,7 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
   // ---------- shared helpers ----------
   // static sky + slowly scrolling star haze + a few code stars on top for parallax
   function backdrop(scene) {
-    scene.add.image(W / 2, H / 2, "bg_sky");
+    scene.add.image(W / 2, H / 2, "bg_sky").setDisplaySize(W, H);
     const haze = scene.add.tileSprite(W / 2, H / 2, W, H, "bg_stars");
     const stars = [];
     for (let i = 0; i < 40; i++) {
@@ -203,19 +207,19 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
     constructor() { super("menu"); }
     create() {
       this.sky = backdrop(this);
-      txt(this, W / 2, 230, "LANGIT", 72, "#ff4d3d"); txt(this, W / 2, 300, "MERAH", 72, "#f3ecdc");
-      txt(this, W / 2, 360, "Studio Aigame · versi 2", 14, "#8e8aa3", MONO);
-      const best = store.get("lm_best", 0); if (best) txt(this, W / 2, 400, "Skor terbaik  " + best, 16, "#ffc857", MONO);
-      const ship = this.add.sprite(W / 2, 520, ART, "player_0").setScale(2.2).play("player");
-      this.tweens.add({ targets: ship, y: 505, duration: 1200, yoyo: true, repeat: -1, ease: "Sine.inOut" });
+      txt(this, W / 2, OY + 230, "LANGIT", 72, "#ff4d3d"); txt(this, W / 2, OY + 300, "MERAH", 72, "#f3ecdc");
+      txt(this, W / 2, OY + 360, "Studio Aigame · versi 1.1", 14, "#8e8aa3", MONO);
+      const best = store.get("lm_best", 0); if (best) txt(this, W / 2, OY + 400, "Skor terbaik  " + best, 16, "#ffc857", MONO);
+      const ship = this.add.sprite(W / 2, OY + 520, ART, "player_0").setScale(2.2).play("player");
+      this.tweens.add({ targets: ship, y: OY + 505, duration: 1200, yoyo: true, repeat: -1, ease: "Sine.inOut" });
       const start = () => { sfx.unlock(); this.scene.start("play"); };
       sfx.musicStop();
-      const play = button(this, W / 2, 615, "MAIN", start, { filled: true, size: 28 });
+      const play = button(this, W / 2, OY + 615, "MAIN", start, { filled: true, size: 28 });
       this.tweens.add({ targets: play, scale: 1.06, duration: 700, yoyo: true, repeat: -1, ease: "Sine.inOut" });
       const touch = this.sys.game.device.input.touch;
-      txt(this, W / 2, 700, touch
+      txt(this, W / 2, OY + 700, touch
         ? "Geser jari di mana saja untuk terbang.\nTembakan otomatis. Tombol II untuk jeda."
-        : "Panah / WASD untuk terbang, tahan SPASI untuk menembak.\nP jeda · M suara · ENTER mulai", 12, "#8e8aa3", MONO).setAlign("center").setLineSpacing(6);
+        : "Panah / WASD untuk terbang, tahan SPASI untuk menembak.\nP jeda · M suara · ENTER mulai", 14, "#8e8aa3", MONO).setAlign("center").setLineSpacing(6);
       this.input.keyboard.once("keydown-ENTER", start); this.input.keyboard.once("keydown-SPACE", start);
     }
     update(t, d) { this.sky(d / 1000); }
@@ -233,15 +237,15 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
       this.over = false; this.paused = false; this.bossAlive = false; this.inWave = false; this.waitingNext = false;
       this.combo = 0; this.bestCombo = 0; this.lastKill = -1e9; this.dry = 0; this.hitThisWave = false; this.diversThisWave = 0;
 
-      this.player = this.physics.add.sprite(W / 2, H - 110, ART, "player_0").setCollideWorldBounds(true).setDepth(5).play("player");
-      this.player.body.setSize(20, 30);
+      this.player = this.physics.add.sprite(W / 2, H - 110, ART, "player_0").setScale(SPR).setCollideWorldBounds(true).setDepth(5).play("player");
+      this.player.body.setSize(20 / SPR, 30 / SPR);
       this.shots = this.physics.add.group({ defaultKey: ART, defaultFrame: "shot", maxSize: 60 });
       this.eshots = this.physics.add.group({ defaultKey: ART, defaultFrame: "eshot", maxSize: 160 });
       this.enemies = this.physics.add.group(); this.powers = this.physics.add.group();
 
       this.thrust = this.add.particles(0, 0, ART, { frame: "px", speedY: { min: 120, max: 220 }, speedX: { min: -20, max: 20 }, scale: { start: 1, end: 0 }, lifespan: 260, tint: [C.ember, C.gold, C.red], frequency: 18, follow: this.player, followOffset: { x: 0, y: 20 } }).setDepth(4);
       this.boomEmitter = this.add.particles(0, 0, ART, { frame: "px", speed: { min: 60, max: 260 }, scale: { start: 1.6, end: 0 }, lifespan: 500, emitting: false, tint: [C.ember, C.gold, C.cream] }).setDepth(6);
-      this.shieldRing = this.add.circle(0, 0, 30).setStrokeStyle(3, C.cyan).setDepth(5).setVisible(false);
+      this.shieldRing = this.add.circle(0, 0, 40).setStrokeStyle(3, C.cyan).setDepth(5).setVisible(false);
 
       this.createHud(); this.createInput();
 
@@ -259,20 +263,20 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
     createHud() {
       this.hud = {
         score: this.add.text(16, 14, "0", { fontFamily: FONT, fontSize: "30px", color: "#f3ecdc", fontStyle: "700" }).setDepth(10),
-        wave: this.add.text(W - 16, 18, "", { fontFamily: MONO, fontSize: "14px", color: "#8e8aa3" }).setOrigin(1, 0).setDepth(10),
-        combo: this.add.text(16, 88, "", { fontFamily: FONT, fontSize: "18px", color: "#ffc857", fontStyle: "700" }).setOrigin(0, 0.5).setDepth(10),
+        wave: this.add.text(W - 16, 18, "", { fontFamily: MONO, fontSize: "17px", color: "#8e8aa3" }).setOrigin(1, 0).setDepth(10),
+        combo: this.add.text(16, 102, "", { fontFamily: FONT, fontSize: "22px", color: "#ffc857", fontStyle: "700" }).setOrigin(0, 0.5).setDepth(10),
         lives: [],
       };
-      for (let i = 0; i < BALANCE.player.maxLives; i++) this.hud.lives.push(this.add.image(24 + i * 26, 64, ART, "player_0").setScale(0.55).setDepth(10));
-      this.bossBarBg = this.add.rectangle(W / 2, 112, W - 40, 6, 0x33203a).setDepth(9).setVisible(false);
-      this.bossBar = this.add.rectangle(W / 2, 112, W - 40, 6, C.red).setDepth(10).setVisible(false);
+      for (let i = 0; i < BALANCE.player.maxLives; i++) this.hud.lives.push(this.add.image(26 + i * 32, 68, ART, "player_0").setScale(0.75).setDepth(10));
+      this.bossBarBg = this.add.rectangle(W / 2, 128, W - 40, 6, 0x33203a).setDepth(9).setVisible(false);
+      this.bossBar = this.add.rectangle(W / 2, 128, W - 40, 6, C.red).setDepth(10).setVisible(false);
       this.banner = txt(this, W / 2, H / 2 - 40, "", 40, "#f3ecdc").setDepth(10).setAlpha(0);
       // small HUD buttons with generous hit areas for thumbs
-      const hudBtn = (x, label, fn) => this.add.text(x, 56, label, { fontFamily: FONT, fontSize: "18px", color: "#8e8aa3", fontStyle: "700" }).setOrigin(0.5).setDepth(10)
-        .setInteractive(new Phaser.Geom.Rectangle(-14, -10, 50, 44), Phaser.Geom.Rectangle.Contains)
+      const hudBtn = (x, label, fn) => this.add.text(x, 62, label, { fontFamily: FONT, fontSize: "28px", color: "#c9c3d9", fontStyle: "700" }).setOrigin(0.5).setDepth(10)
+        .setInteractive(new Phaser.Geom.Rectangle(-20, -16, 76, 68), Phaser.Geom.Rectangle.Contains)
         .on("pointerdown", (p, x, y, ev) => { ev.stopPropagation(); fn(); });
-      this.muteBtn = hudBtn(W - 26, sfx.muted ? "🔇" : "🔊", () => this.toggleMute());
-      this.pauseBtn = hudBtn(W - 72, "II", () => this.togglePause());
+      this.muteBtn = hudBtn(W - 30, sfx.muted ? "🔇" : "🔊", () => this.toggleMute());
+      this.pauseBtn = hudBtn(W - 90, "II", () => this.togglePause());
       this.createPauseMenu();
     }
     createInput() {
@@ -380,24 +384,24 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
       const E = BALANCE.enemy, type = this.pickType();
       const x = pattern === 0 ? 40 + (i % 8) * ((W - 80) / 7) : pattern === 1 ? (i % 2 ? W - 40 : 40) : W / 2 + Math.sin(i) * 160;
       const frame = type === 3 ? "e3_0" : type === DIVER ? "penyelam" : "e" + type;
-      const e = this.enemies.create(x, -30, ART, frame);
+      const e = this.enemies.create(x, -30, ART, frame).setScale(SPR);
       Object.assign(e, { type, hp: E.types[type].hp, score: E.types[type].score, t: Math.random() * 6, pattern, baseX: x });
       e.fireAt = this.time.now + Phaser.Math.Between(600, 1800);
       if (type === DIVER) {
-        e.state = "descend"; e.body.setSize(16, 20); e.setVelocityY(BALANCE.diver.descendSpeed);
+        e.state = "descend"; e.body.setSize(16 / SPR, 20 / SPR); e.setVelocityY(BALANCE.diver.descendSpeed);
         e.x = Phaser.Math.Clamp(x + Phaser.Math.Between(-60, 60), 30, W - 30);
         return;
       }
-      e.body.setSize(e.width * 0.8, e.height * 0.8);
+      e.body.setSize(e.width * 0.8 / SPR, e.height * 0.8 / SPR);
       e.setVelocityY(E.speedBase + Math.min(E.speedWaveMax, this.wave * E.speedPerWave) + type * E.speedPerType);
       if (type === 3) e.play("e3");
     }
     spawnBoss() {
       const BS = BALANCE.boss, k = this.wave / BALANCE.wave.bossEvery;
       this.say("BOSS!", "#ff4d3d"); sfx.boss(); sfx.musicDuck(true); this.bossAlive = true;
-      const b = this.enemies.create(W / 2, -60, ART, "boss");
+      const b = this.enemies.create(W / 2, -60, ART, "boss").setScale(BOSS_SPR);
       Object.assign(b, { type: BOSS, k, hpMax: BS.hpFirst + BS.hpPerBoss * (k - 1), score: BS.score, t: 0, pattern: BOSS, shotsFired: 0, rage: false });
-      b.hp = b.hpMax; b.body.setSize(100, 60);
+      b.hp = b.hpMax; b.body.setSize(100 / BOSS_SPR, 60 / BOSS_SPR);
       this.tweens.add({ targets: b, y: 160, duration: 1800, ease: "Sine.out" });
       b.fireAt = this.time.now + 2000; this.boss = b;
       this.bossBar.width = W - 40; this.bossBar.setVisible(true); this.bossBarBg.setVisible(true);
@@ -439,7 +443,7 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
     dropPower(x, y, kind) {
       const PW = BALANCE.power.weights, full = this.lives >= BALANCE.player.maxLives;
       const k = kind || weighted([["p_gun", PW.p_gun + (full ? PW.p_life : 0)], ["p_shield", PW.p_shield], ["p_life", full ? 0 : PW.p_life]]);
-      const p = this.powers.create(x, y, ART, k); p.kind = k; p.setVelocityY(BALANCE.power.fallSpeed);
+      const p = this.powers.create(x, y, ART, k).setScale(SPR); p.kind = k; p.setVelocityY(BALANCE.power.fallSpeed);
       this.tweens.add({ targets: p, angle: 360, duration: 1600, repeat: -1 });
     }
     pickup(p) {
@@ -454,7 +458,7 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
     }
     explode(x, y, scale) {
       this.boomEmitter.explode(Math.round(14 * scale), x, y);
-      const b = this.add.sprite(x, y, ART, "boom_0").setScale(1.5 * scale).setDepth(6).play("boom");
+      const b = this.add.sprite(x, y, ART, "boom_0").setScale(1.5 * SPR * scale).setDepth(6).play("boom");
       b.once("animationcomplete", () => b.destroy());
     }
     damage() {
@@ -473,7 +477,7 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
     }
     enemyShot(x, y, vx, vy, frame) {
       const s = this.eshots.get(x, y); if (!s) return;
-      s.setFrame(frame || "eshot").setActive(true).setVisible(true); s.body.enable = true; s.setVelocity(vx, vy);
+      s.setFrame(frame || "eshot").setScale(SPR).setActive(true).setVisible(true); s.body.enable = true; s.body.setSize(10 / SPR, 10 / SPR); s.setVelocity(vx, vy);
     }
     gameOver() {
       this.over = true; this.player.setVisible(false); sfx.musicStop(); sfx.gameOver(); this.thrust.stop(); this.physics.pause();
@@ -481,16 +485,16 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
       const record = this.score >= best && this.score > 0;
       this.pauseBtn.setVisible(false);
       this.add.rectangle(W / 2, H / 2, W, H, 0x05060f, 0.72).setDepth(20);
-      txt(this, W / 2, 210, "PESAWAT JATUH", 42, "#ff4d3d").setDepth(21);
-      txt(this, W / 2, 290, "SKOR", 14, "#8e8aa3", MONO).setDepth(21);
-      const sc = txt(this, W / 2, 330, String(this.score), 56, "#f3ecdc").setDepth(21);
-      if (record) { txt(this, W / 2, 385, "REKOR BARU!", 20, "#ffc857").setDepth(21); this.tweens.add({ targets: sc, scale: 1.12, duration: 500, yoyo: true, repeat: -1 }); }
-      else txt(this, W / 2, 385, "Skor terbaik " + best, 18, "#ffc857", MONO).setDepth(21);
-      txt(this, W / 2, 425, "Gelombang " + this.wave + "  ·  Kombo tertinggi " + this.bestCombo, 13, "#8e8aa3", MONO).setDepth(21);
+      txt(this, W / 2, OY + 210, "PESAWAT JATUH", 42, "#ff4d3d").setDepth(21);
+      txt(this, W / 2, OY + 290, "SKOR", 14, "#8e8aa3", MONO).setDepth(21);
+      const sc = txt(this, W / 2, OY + 330, String(this.score), 56, "#f3ecdc").setDepth(21);
+      if (record) { txt(this, W / 2, OY + 385, "REKOR BARU!", 20, "#ffc857").setDepth(21); this.tweens.add({ targets: sc, scale: 1.12, duration: 500, yoyo: true, repeat: -1 }); }
+      else txt(this, W / 2, OY + 385, "Skor terbaik " + best, 18, "#ffc857", MONO).setDepth(21);
+      txt(this, W / 2, OY + 425, "Gelombang " + this.wave + "  ·  Kombo tertinggi " + this.bestCombo, 13, "#8e8aa3", MONO).setDepth(21);
       // buttons appear after a beat so a tap meant for the ship does not restart by accident
       this.time.delayedCall(700, () => {
-        button(this, W / 2, 520, "MAIN LAGI", () => this.scene.restart(), { filled: true });
-        button(this, W / 2, 596, "MENU", () => this.scene.start("menu"));
+        button(this, W / 2, OY + 520, "MAIN LAGI", () => this.scene.restart(), { filled: true });
+        button(this, W / 2, OY + 596, "MENU", () => this.scene.start("menu"));
         this.input.keyboard.once("keydown-ENTER", () => this.scene.restart());
       });
     }
@@ -515,8 +519,8 @@ body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui
       const wantFire = k.space.isDown || this.touch || touchUsed;
       if (wantFire && time > this.lastShot + (this.gun >= G.maxLevel ? G.fireMsMax : G.fireMs)) {
         this.lastShot = time; sfx.shoot();
-        const offs = this.gun === 1 ? [0] : this.gun === 2 ? [-9, 9] : [-12, 0, 12];
-        for (const o of offs) { const s = this.shots.get(p.x + o, p.y - 24); if (s) { s.setActive(true).setVisible(true).setVelocityY(-G.shotSpeed); s.body.enable = true; } }
+        const offs = this.gun === 1 ? [0] : this.gun === 2 ? [-11, 11] : [-15, 0, 15];
+        for (const o of offs) { const s = this.shots.get(p.x + o, p.y - 30); if (s) { s.setScale(SPR); s.body.setSize(4 / SPR, 14 / SPR); s.setActive(true).setVisible(true).setVelocityY(-G.shotSpeed); s.body.enable = true; } }
       }
     }
     cleanup() {
