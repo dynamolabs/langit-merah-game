@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Langit Merah</title>
+<meta name="description" content="Langit Merah: a retro arcade shooter made with Phaser.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one-screen game; the Phaser canvas fills the frame and letterboxes with a dark sky. Single committed night-arcade look (deliberate). */
+:root { --bg: #090a14; --fg: #f3ecdc; --accent: #ff4d3d; --muted: #8e8aa3; color-scheme: dark; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--fg); font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace; overflow: hidden;
+  overscroll-behavior: none; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+/* keep the canvas clear of notches and the home indicator on phones */
+#game { position: fixed; top: env(safe-area-inset-top, 0px); right: env(safe-area-inset-right, 0px); bottom: env(safe-area-inset-bottom, 0px); left: env(safe-area-inset-left, 0px); }
+#game canvas { max-width: 100%; max-height: 100%; }
+.foot { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 11px; pointer-events: none;
+  padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px)); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+@media (max-width: 640px) { .foot { display: none; } }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<div class="foot"><span>panah / WASD gerak</span><span>spasi tahan untuk menembak (otomatis di HP)</span><span>P jeda</span><span>M suara</span></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"></script>
+<!-- pixel art from the Art division (art/sprites-embed.js): sets window.LM_ART = { sheet, atlas, bg_sky, bg_stars } -->
+<script src="sprites-embed.js"></script>
+<!-- music + SFX from the Audio division (audio/audio-embed.js): sets window.LM_AUDIO = { music_loop, shoot, ... } as MP3 data URIs -->
+<script src="audio-embed.js"></script>
+<script>
+/*
+ * Langit Merah v2 — Studio Aigame
+ * Struktur file (urut dari atas):
+ *   1. BALANCE   angka keseimbangan game (divisi Desain cukup ubah bagian ini; lihat "Spec v2" di DESIGN-DOCUMENT.md)
+ *   2. PALETTE   warna dan font
+ *   3. store, sfx   simpan skor terbaik, suara Web Audio
+ *   4. Boot      memuat sprite pixel art (atlas "lm") dan animasi
+ *   5. Menu      layar judul
+ *   6. Play      permainan: gelombang, musuh, boss, power-up, kombo, HUD, game over
+ *   7. new Phaser.Game(...)
+ */
+(() => {
+  // ================= 1. BALANCE =================
+  const BALANCE = {
+    player: { speed: 340, minY: 260, startLives: 3, maxLives: 5, touchGain: 1.4, invulnMs: 1500 },
+    gun: { maxLevel: 3, fireMs: 150, fireMsMax: 110, shotSpeed: 620, maxedBonus: 100 },
+    wave: {
+      baseCount: 6, countPerWave: 2, maxCount: 24,
+      spawnGapMs: 520, gapCutPerWave: 20, minGapMs: 260,
+      restMs: 1200, afterBossMs: 2500, bossEvery: 5, perfectBase: 100, perfectPerWave: 10, perfectMax: 300,
+    },
+    enemy: {
+      speedBase: 70, speedPerWave: 6, speedWaveMax: 120, speedPerType: 15,
+      types: { 1: { hp: 1, score: 10 }, 2: { hp: 2, score: 20 }, 3: { hp: 3, score: 30 }, 4: { hp: 1, score: 25 } },
+      fireMinMs: 1500, fireMaxMs: 2600, shotSpeed: 200, shotSpeedPerWave: 4, shotSpeedWaveMax: 80,
+      // [from wave, % type1, % type2, % type3, % diver]
+      mix: [[1, 100, 0, 0, 0], [2, 70, 30, 0, 0], [4, 50, 30, 20, 0], [7, 35, 30, 20, 15], [10, 25, 30, 25, 20]],
+    },
+    diver: { maxPerWave: 3, descendSpeed: 60, stopY: 220, warnMs: 400, diveSpeed: 340 },
+    boss: {
+      hpFirst: 50, hpPerBoss: 20, score: 500,
+      fireMs: 1400, fireMsMin: 500, fireCutPerWave: 30, shotSpeed: 220, shotSpeedPerWave: 8,
+      ringFromBoss: 2, ringEvery: 3, ringBullets: 12, ringSpeed: 160,
+      rageBelow: 0.5, rageFireMul: 0.75,
+    },
+    power: { dropChance: 0.12, pityAfter: 15, fallSpeed: 90, weights: { p_gun: 45, p_shield: 35, p_life: 20 } },
+    combo: { windowMs: 2000, tiers: [[40, 4], [25, 3], [10, 2]], escapePenalty: 5, diverEscapeFree: true },
+  };
+
+  // ================= 2. PALETTE =================
+  const W = 480, H = 800;
+  const C = { sky: 0x0b0d1f, red: 0xff4d3d, cream: 0xf3ecdc, cyan: 0x5fe3ff, lime: 0xb8ff5f, violet: 0xb48cff, gold: 0xffc857, ember: 0xff8a3d };
+  const FONT = "'Chakra Petch', sans-serif", MONO = "'IBM Plex Mono', monospace";
+  const BOSS = 9, DIVER = 4; // enemy type ids
+  let touchUsed = false;      // set by the first real touch (see createInput)
+  const ART = "lm";          // atlas key
+
+  // ================= 3. store, sfx =================
+  const store = {
+    get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (_) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (_) {} },
+  };
+
+  // tiny synth (no audio files)
+  const sfx = (() => {
+    let ctx = null, muted = store.get("lm_muted", false);
+    const ensure = () => {
+      if (!ctx) { try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (_) { ctx = null; } }
+      if (ctx && ctx.state === "suspended") ctx.resume();
+      return ctx;
+    };
+    const tone = (f0, f1, dur, type, vol) => {
+      const c = ensure(); if (!c || muted) return;
+      const o = c.createOscillator(), g = c.createGain();
+      o.type = type; o.frequency.setValueAtTime(f0, c.currentTime); o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), c.currentTime + dur);
+      g.gain.setValueAtTime(vol, c.currentTime); g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + dur);
+      o.connect(g); g.connect(c.destination); o.start(); o.stop(c.currentTime + dur);
+    };
+    const noise = (dur, vol) => {
+      const c = ensure(); if (!c || muted) return;
+      const b = c.createBuffer(1, c.sampleRate * dur, c.sampleRate), d = b.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+      const s = c.createBufferSource(); s.buffer = b;
+      const g = c.createGain(); g.gain.value = vol;
+      const f = c.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = 900;
+      s.connect(f); f.connect(g); g.connect(c.destination); s.start();
+    };
+    // once the Audio division's samples are decoded (see Boot), play those; until then (or if decoding fails) use the synth
+    let bank = null, music = null, lastShoot = 0;
+    const play = (key, vol, synth) => { if (bank) { if (!muted) bank.play(key, { volume: vol }); } else synth(); };
+    return {
+      unlock: ensure,
+      useSamples(soundManager) { bank = soundManager; bank.mute = muted; },
+      shoot: () => { const now = performance.now(); if (now - lastShoot < 60) return; lastShoot = now; play("shoot", 0.35, () => tone(880, 220, 0.08, "square", 0.05)); },
+      hit: () => play("enemy_hit", 0.5, () => tone(300, 80, 0.12, "sawtooth", 0.08)),
+      boom: () => play("explosion", 0.6, () => { noise(0.35, 0.25); tone(120, 30, 0.35, "triangle", 0.2); }),
+      bigBoom: () => play("explosion_big", 0.8, () => { noise(0.6, 0.35); tone(120, 30, 0.6, "triangle", 0.25); }),
+      power: () => play("powerup", 0.6, () => { tone(440, 880, 0.12, "square", 0.08); setTimeout(() => tone(660, 1320, 0.15, "square", 0.08), 90); }),
+      hurt: () => play("player_hit", 0.7, () => { tone(200, 60, 0.3, "sawtooth", 0.2); noise(0.2, 0.2); }),
+      boss: () => play("boss_warning", 0.7, () => tone(80, 160, 0.6, "sawtooth", 0.2)),
+      warn: () => tone(1200, 900, 0.1, "square", 0.04),
+      combo: () => play("combo_up", 0.6, () => tone(660, 990, 0.1, "triangle", 0.08)),
+      perfect: () => play("wave_clear", 0.6, () => { tone(523, 1046, 0.15, "triangle", 0.1); setTimeout(() => tone(784, 1568, 0.2, "triangle", 0.1), 120); }),
+      gameOver: () => play("game_over", 0.7, () => tone(400, 60, 0.9, "triangle", 0.2)),
+      // background music: starts on the first press of MAIN, loops across scenes
+      musicStart() { if (!bank) return; if (!music) music = bank.add("music_loop", { loop: true, volume: 0.45 }); music.setVolume(0.45); if (!music.isPlaying) music.play(); },
+      musicDuck(on) { if (music) music.setVolume(on ? 0.3 : 0.45); },
+      musicStop() { if (music) music.stop(); },
+      musicPause(on) { if (!music) return; if (on && music.isPlaying) music.pause(); else if (!on && music.isPaused) music.resume(); },
+      toggle() { muted = !muted; store.set("lm_muted", muted); if (bank) bank.mute = muted; return muted; },
+      get muted() { return muted; },
+    };
+  })();
+
+  // ================= 4. Boot: pixel art + animations =================
+  class Boot extends Phaser.Scene {
+    constructor() { super("boot"); }
+    create() {
+      // the art is embedded as data URIs; decode them as plain images (Phaser's loader refuses data URIs on file://)
+      const A = window.LM_ART, img = (src) => new Promise((ok, fail) => { const i = new Image(); i.onload = () => ok(i); i.onerror = fail; i.src = src; });
+      Promise.all([img(A.sheet), img(A.bg_sky), img(A.bg_stars)]).then(([sheet, sky, stars]) => {
+        this.textures.addAtlasJSONHash(ART, sheet, A.atlas);
+        this.textures.addImage("bg_sky", sky); this.textures.addImage("bg_stars", stars);
+        this.ready();
+      });
+      // music and SFX from the Audio division (audio/audio-embed.js); decoded in the background, the synth covers until then
+      const L = window.LM_AUDIO;
+      if (L && this.sound.context && this.sound.decodeAudio) {
+        this.sound.once("decodedall", () => sfx.useSamples(this.sound));
+        this.sound.decodeAudio(Object.entries(L).map(([key, data]) => ({ key, data })));
+      }
+    }
+    ready() {
+      // keep pixels crisp while text stays smooth
+      for (const k of [ART, "bg_sky", "bg_stars"]) this.textures.get(k).setFilter(Phaser.Textures.FilterMode.NEAREST);
+      const frames = (prefix, n) => Array.from({ length: n }, (_, i) => ({ key: ART, frame: prefix + i }));
+      this.anims.create({ key: "player", frames: frames("player_", 2), frameRate: 8, repeat: -1 });
+      this.anims.create({ key: "e3", frames: frames("e3_", 4), frameRate: 10, repeat: -1 });
+      this.anims.create({ key: "boom", frames: frames("boom_", 6), frameRate: 14, hideOnComplete: true });
+      this.scene.start("menu");
+    }
+  }
+
+  // ---------- shared helpers ----------
+  // static sky + slowly scrolling star haze + a few code stars on top for parallax
+  function backdrop(scene) {
+    scene.add.image(W / 2, H / 2, "bg_sky");
+    const haze = scene.add.tileSprite(W / 2, H / 2, W, H, "bg_stars");
+    const stars = [];
+    for (let i = 0; i < 40; i++) {
+      const s = scene.add.image(Phaser.Math.Between(0, W), Phaser.Math.Between(0, H), ART, "star")
+        .setAlpha(Phaser.Math.FloatBetween(0.3, 0.9)).setScale(Phaser.Math.FloatBetween(0.5, 1));
+      s.v = 60 + s.scale * 120; stars.push(s);
+    }
+    return (dt) => {
+      haze.tilePositionY -= 20 * dt;
+      for (const s of stars) { s.y += s.v * dt; if (s.y > H + 4) { s.y = -4; s.x = Phaser.Math.Between(0, W); } }
+    };
+  }
+  const txt = (scene, x, y, s, size, color, font) =>
+    scene.add.text(x, y, s, { fontFamily: font || FONT, fontSize: size + "px", color: color || "#f3ecdc", fontStyle: "700" }).setOrigin(0.5);
+  // a tappable pill button; stops the tap from also reaching the scene (so it never moves the ship)
+  function button(scene, x, y, label, onClick, opts = {}) {
+    const w = opts.w || 220, h = opts.h || 56, color = opts.color || C.cyan;
+    const bg = scene.add.rectangle(0, 0, w, h, color, opts.filled ? 1 : 0.12).setStrokeStyle(2, color);
+    const t = txt(scene, 0, 0, label, opts.size || 24, opts.filled ? "#0b0d1f" : "#" + color.toString(16).padStart(6, "0"));
+    const b = scene.add.container(x, y, [bg, t]).setSize(w, h).setDepth(opts.depth || 30)
+      .setInteractive({ useHandCursor: true })
+      .on("pointerover", () => b.setScale(1.05)).on("pointerout", () => b.setScale(1))
+      .on("pointerdown", (p, lx, ly, ev) => { ev.stopPropagation(); if (p.wasTouch) touchUsed = true; sfx.unlock(); onClick(); });
+    return b;
+  }
+  const weighted = (pairs) => { // [[value, weight], ...]
+    let r = Math.random() * pairs.reduce((a, p) => a + p[1], 0);
+    for (const [v, w] of pairs) { if ((r -= w) < 0) return v; }
+    return pairs[0][0];
+  };
+
+  // ================= 5. Menu =================
+  class Menu extends Phaser.Scene {
+    constructor() { super("menu"); }
+    create() {
+      this.sky = backdrop(this);
+      txt(this, W / 2, 230, "LANGIT", 72, "#ff4d3d"); txt(this, W / 2, 300, "MERAH", 72, "#f3ecdc");
+      txt(this, W / 2, 360, "Studio Aigame · versi 2", 14, "#8e8aa3", MONO);
+      const best = store.get("lm_best", 0); if (best) txt(this, W / 2, 400, "Skor terbaik  " + best, 16, "#ffc857", MONO);
+      const ship = this.add.sprite(W / 2, 520, ART, "player_0").setScale(2.2).play("player");
+      this.tweens.add({ targets: ship, y: 505, duration: 1200, yoyo: true, repeat: -1, ease: "Sine.inOut" });
+      const start = () => { sfx.unlock(); this.scene.start("play"); };
+      sfx.musicStop();
+      const play = button(this, W / 2, 615, "MAIN", start, { filled: true, size: 28 });
+      this.tweens.add({ targets: play, scale: 1.06, duration: 700, yoyo: true, repeat: -1, ease: "Sine.inOut" });
+      const touch = this.sys.game.device.input.touch;
+      txt(this, W / 2, 700, touch
+        ? "Geser jari di mana saja untuk terbang.\nTembakan otomatis. Tombol II untuk jeda."
+        : "Panah / WASD untuk terbang, tahan SPASI untuk menembak.\nP jeda · M suara · ENTER mulai", 12, "#8e8aa3", MONO).setAlign("center").setLineSpacing(6);
+      this.input.keyboard.once("keydown-ENTER", start); this.input.keyboard.once("keydown-SPACE", start);
+    }
+    update(t, d) { this.sky(d / 1000); }
+  }
+
+  // ================= 6. Play =================
+  class Play extends Phaser.Scene {
+    constructor() { super("play"); }
+
+    // ---- setup ----
+    create() {
+      const B = BALANCE;
+      this.sky = backdrop(this);
+      this.score = 0; this.lives = B.player.startLives; this.wave = 0; this.gun = 1; this.shield = 0;
+      this.over = false; this.paused = false; this.bossAlive = false; this.inWave = false; this.waitingNext = false;
+      this.combo = 0; this.bestCombo = 0; this.lastKill = -1e9; this.dry = 0; this.hitThisWave = false; this.diversThisWave = 0;
+
+      this.player = this.physics.add.sprite(W / 2, H - 110, ART, "player_0").setCollideWorldBounds(true).setDepth(5).play("player");
+      this.player.body.setSize(20, 30);
+      this.shots = this.physics.add.group({ defaultKey: ART, defaultFrame: "shot", maxSize: 60 });
+      this.eshots = this.physics.add.group({ defaultKey: ART, defaultFrame: "eshot", maxSize: 160 });
+      this.enemies = this.physics.add.group(); this.powers = this.physics.add.group();
+
+      this.thrust = this.add.particles(0, 0, ART, { frame: "px", speedY: { min: 120, max: 220 }, speedX: { min: -20, max: 20 }, scale: { start: 1, end: 0 }, lifespan: 260, tint: [C.ember, C.gold, C.red], frequency: 18, follow: this.player, followOffset: { x: 0, y: 20 } }).setDepth(4);
+      this.boomEmitter = this.add.particles(0, 0, ART, { frame: "px", speed: { min: 60, max: 260 }, scale: { start: 1.6, end: 0 }, lifespan: 500, emitting: false, tint: [C.ember, C.gold, C.cream] }).setDepth(6);
+      this.shieldRing = this.add.circle(0, 0, 30).setStrokeStyle(3, C.cyan).setDepth(5).setVisible(false);
+
+      this.createHud(); this.createInput();
+
+      this.physics.add.overlap(this.shots, this.enemies, (s, e) => this.hitEnemy(s, e));
+      this.physics.add.overlap(this.player, this.enemies, (p, e) => this.ram(e));
+      this.physics.add.overlap(this.player, this.eshots, (p, s) => { s.destroy(); this.damage(); });
+      this.physics.add.overlap(this.player, this.powers, (p, pw) => this.pickup(pw));
+      this.physics.world.setBounds(0, 0, W, H);
+
+      sfx.musicStart();
+      // hold the "wave cleared" check until wave 1 starts; otherwise the empty screen counted as a cleared wave and skipped to wave 2
+      this.waitingNext = true;
+      this.drawHud(); this.time.delayedCall(800, () => { this.waitingNext = false; this.nextWave(); });
+    }
+    createHud() {
+      this.hud = {
+        score: this.add.text(16, 14, "0", { fontFamily: FONT, fontSize: "30px", color: "#f3ecdc", fontStyle: "700" }).setDepth(10),
+        wave: this.add.text(W - 16, 18, "", { fontFamily: MONO, fontSize: "14px", color: "#8e8aa3" }).setOrigin(1, 0).setDepth(10),
+        combo: this.add.text(16, 88, "", { fontFamily: FONT, fontSize: "18px", color: "#ffc857", fontStyle: "700" }).setOrigin(0, 0.5).setDepth(10),
+        lives: [],
+      };
+      for (let i = 0; i < BALANCE.player.maxLives; i++) this.hud.lives.push(this.add.image(24 + i * 26, 64, ART, "player_0").setScale(0.55).setDepth(10));
+      this.bossBarBg = this.add.rectangle(W / 2, 112, W - 40, 6, 0x33203a).setDepth(9).setVisible(false);
+      this.bossBar = this.add.rectangle(W / 2, 112, W - 40, 6, C.red).setDepth(10).setVisible(false);
+      this.banner = txt(this, W / 2, H / 2 - 40, "", 40, "#f3ecdc").setDepth(10).setAlpha(0);
+      // small HUD buttons with generous hit areas for thumbs
+      const hudBtn = (x, label, fn) => this.add.text(x, 56, label, { fontFamily: FONT, fontSize: "18px", color: "#8e8aa3", fontStyle: "700" }).setOrigin(0.5).setDepth(10)
+        .setInteractive(new Phaser.Geom.Rectangle(-14, -10, 50, 44), Phaser.Geom.Rectangle.Contains)
+        .on("pointerdown", (p, x, y, ev) => { ev.stopPropagation(); fn(); });
+      this.muteBtn = hudBtn(W - 26, sfx.muted ? "🔇" : "🔊", () => this.toggleMute());
+      this.pauseBtn = hudBtn(W - 72, "II", () => this.togglePause());
+      this.createPauseMenu();
+    }
+    createInput() {
+      this.keys = this.input.keyboard.addKeys({ left: "LEFT", right: "RIGHT", up: "UP", down: "DOWN", a: "A", d: "D", w: "W", s: "S", space: "SPACE", p: "P" });
+      this.input.keyboard.on("keydown-P", () => this.togglePause());
+      this.input.keyboard.on("keydown-ESC", () => this.togglePause());
+      this.input.keyboard.on("keydown-M", () => this.toggleMute());
+      // auto-pause when the player switches app / tab (phones especially)
+      const onHide = () => { if (document.hidden && !this.paused && !this.over) this.togglePause(); };
+      document.addEventListener("visibilitychange", onHide);
+      this.events.once("shutdown", () => document.removeEventListener("visibilitychange", onHide));
+      const gain = BALANCE.player.touchGain;
+      this.touch = null;
+      this.input.on("pointerdown", p => { if (p.wasTouch) touchUsed = true; if (this.over || this.paused) return; this.touch = { x: p.x, y: p.y, px: this.player.x, py: this.player.y }; });
+      this.input.on("pointermove", p => {
+        if (!this.touch || !p.isDown || this.paused) return;
+        this.player.x = Phaser.Math.Clamp(this.touch.px + (p.x - this.touch.x) * gain, 16, W - 16);
+        this.player.y = Phaser.Math.Clamp(this.touch.py + (p.y - this.touch.y) * gain, BALANCE.player.minY, H - 30);
+      });
+      this.input.on("pointerup", () => { this.touch = null; });
+      this.lastShot = 0;
+    }
+    drawHud() {
+      this.hud.score.setText(String(this.score));
+      this.hud.lives.forEach((l, i) => l.setVisible(i < this.lives));
+      this.hud.wave.setText("GELOMBANG " + this.wave + (this.gun > 1 ? "  ·  senjata x" + this.gun : ""));
+    }
+    say(s, color, size) {
+      this.banner.setText(s).setColor(color || "#f3ecdc").setFontSize((size || 40) + "px").setAlpha(0).setScale(0.8);
+      this.tweens.add({ targets: this.banner, alpha: 1, scale: 1, duration: 250, yoyo: true, hold: 900 });
+    }
+    toggleMute() { this.muteBtn.setText(sfx.toggle() ? "🔇" : "🔊"); }
+    createPauseMenu() {
+      const dim = this.add.rectangle(W / 2, H / 2, W, H, 0x05060f, 0.7);
+      const title = txt(this, W / 2, H / 2 - 110, "JEDA", 48, "#f3ecdc");
+      const resume = button(this, W / 2, H / 2, "LANJUT", () => this.togglePause(), { filled: true });
+      const menu = button(this, W / 2, H / 2 + 76, "MENU", () => { this.togglePause(); this.scene.start("menu"); });
+      this.pauseMenu = this.add.container(0, 0, [dim, title, resume, menu]).setDepth(30).setVisible(false);
+    }
+    togglePause() {
+      if (this.over) return;
+      this.paused = !this.paused; this.touch = null;
+      // freeze physics, timers (wave spawns), tweens and sprite animations together so nothing moves while paused
+      if (this.paused) { this.physics.pause(); this.time.paused = true; this.tweens.pauseAll(); this.anims.pauseAll(); }
+      else { this.physics.resume(); this.time.paused = false; this.tweens.resumeAll(); this.anims.resumeAll(); }
+      sfx.musicPause(this.paused); this.pauseMenu.setVisible(this.paused); this.pauseBtn.setText(this.paused ? "▶" : "II");
+    }
+
+    // ---- combo ----
+    multiplier() { for (const [n, m] of BALANCE.combo.tiers) if (this.combo >= n) return m; return 1; }
+    addCombo() {
+      const before = this.multiplier();
+      this.combo = this.time.now - this.lastKill <= BALANCE.combo.windowMs ? this.combo + 1 : 1;
+      this.lastKill = this.time.now; this.bestCombo = Math.max(this.bestCombo, this.combo);
+      const m = this.multiplier(), t = this.hud.combo;
+      t.setColor("#ffc857").setAlpha(1).setText(this.combo >= 2 ? "KOMBO " + this.combo + (m > 1 ? "   x" + m : "") : "");
+      if (m > before) { sfx.combo(); t.setScale(1.6); this.tweens.add({ targets: t, scale: 1, duration: 300, ease: "Back.out" }); }
+    }
+    cutCombo(n) {
+      if (this.combo <= 0) return;
+      this.combo = Math.max(0, this.combo - n);
+      const m = this.multiplier(), t = this.hud.combo;
+      t.setText(this.combo >= 2 ? "KOMBO " + this.combo + (m > 1 ? "   x" + m : "") : "").setColor("#8e8aa3");
+      this.time.delayedCall(250, () => t.setColor("#ffc857"));
+    }
+    breakCombo() {
+      if (this.combo >= 2) {
+        const t = this.hud.combo; t.setColor("#8e8aa3");
+        this.tweens.add({ targets: t, alpha: 0, duration: 120, yoyo: true, repeat: 2, onComplete: () => t.setText("").setAlpha(1) });
+      }
+      this.combo = 0; this.lastKill = -1e9;
+    }
+
+    // ---- waves ----
+    nextWave() {
+      if (this.over) return;
+      const WV = BALANCE.wave;
+      this.wave++; this.hitThisWave = false; this.diversThisWave = 0; this.drawHud();
+      if (this.wave % WV.bossEvery === 0) { this.spawnBoss(); return; }
+      this.say("GELOMBANG " + this.wave, "#5fe3ff"); this.inWave = true;
+      const n = Math.min(WV.maxCount, WV.baseCount + this.wave * WV.countPerWave), pattern = this.wave % 3;
+      const gap = Math.max(WV.minGapMs, WV.spawnGapMs - this.wave * WV.gapCutPerWave);
+      for (let i = 0; i < n; i++) this.time.delayedCall(200 + i * gap, () => this.spawnEnemy(i, n, pattern));
+      // the wave is over once its last enemy has spawned (v1 used a fixed 520 ms gap here, leaving long empty pauses)
+      this.time.delayedCall(200 + (n - 1) * gap + 100, () => { this.inWave = false; });
+    }
+    waveCleared() {
+      const WV = BALANCE.wave, wasBoss = this.wave % WV.bossEvery === 0;
+      if (wasBoss) { this.say("SEKTOR BERSIH", "#5fe3ff", 34); sfx.perfect(); }
+      else if (!this.hitThisWave) {
+        const bonus = Math.min(WV.perfectMax, WV.perfectBase + WV.perfectPerWave * this.wave); this.score += bonus; this.drawHud();
+        this.say("SEMPURNA +" + bonus, "#ffc857", 34); sfx.perfect();
+      }
+      this.time.delayedCall(wasBoss ? WV.afterBossMs : WV.restMs, () => { this.waitingNext = false; this.nextWave(); });
+    }
+    pickType() {
+      const mix = BALANCE.enemy.mix.filter(r => this.wave >= r[0]).pop();
+      let type = weighted([[1, mix[1]], [2, mix[2]], [3, mix[3]], [DIVER, mix[4]]]);
+      if (type === DIVER && this.diversThisWave >= BALANCE.diver.maxPerWave) type = 1;
+      if (type === DIVER) this.diversThisWave++;
+      return type;
+    }
+    spawnEnemy(i, n, pattern) {
+      if (this.over) return;
+      const E = BALANCE.enemy, type = this.pickType();
+      const x = pattern === 0 ? 40 + (i % 8) * ((W - 80) / 7) : pattern === 1 ? (i % 2 ? W - 40 : 40) : W / 2 + Math.sin(i) * 160;
+      const frame = type === 3 ? "e3_0" : type === DIVER ? "penyelam" : "e" + type;
+      const e = this.enemies.create(x, -30, ART, frame);
+      Object.assign(e, { type, hp: E.types[type].hp, score: E.types[type].score, t: Math.random() * 6, pattern, baseX: x });
+      e.fireAt = this.time.now + Phaser.Math.Between(600, 1800);
+      if (type === DIVER) {
+        e.state = "descend"; e.body.setSize(16, 20); e.setVelocityY(BALANCE.diver.descendSpeed);
+        e.x = Phaser.Math.Clamp(x + Phaser.Math.Between(-60, 60), 30, W - 30);
+        return;
+      }
+      e.body.setSize(e.width * 0.8, e.height * 0.8);
+      e.setVelocityY(E.speedBase + Math.min(E.speedWaveMax, this.wave * E.speedPerWave) + type * E.speedPerType);
+      if (type === 3) e.play("e3");
+    }
+    spawnBoss() {
+      const BS = BALANCE.boss, k = this.wave / BALANCE.wave.bossEvery;
+      this.say("BOSS!", "#ff4d3d"); sfx.boss(); sfx.musicDuck(true); this.bossAlive = true;
+      const b = this.enemies.create(W / 2, -60, ART, "boss");
+      Object.assign(b, { type: BOSS, k, hpMax: BS.hpFirst + BS.hpPerBoss * (k - 1), score: BS.score, t: 0, pattern: BOSS, shotsFired: 0, rage: false });
+      b.hp = b.hpMax; b.body.setSize(100, 60);
+      this.tweens.add({ targets: b, y: 160, duration: 1800, ease: "Sine.out" });
+      b.fireAt = this.time.now + 2000; this.boss = b;
+      this.bossBar.width = W - 40; this.bossBar.setVisible(true); this.bossBarBg.setVisible(true);
+    }
+
+    // ---- combat ----
+    hitEnemy(s, e) {
+      s.destroy(); e.hp--; if (e.hp > 0) sfx.hit();
+      if (e.type === BOSS) {
+        e.flashUntil = this.time.now + 60;
+        this.bossBar.width = (W - 40) * Math.max(0, e.hp / e.hpMax);
+        if (!e.rage && e.hp / e.hpMax < BALANCE.boss.rageBelow) { e.rage = true; this.cameras.main.shake(200, 0.006); }
+      } else { e.setTintFill(0xffffff); this.time.delayedCall(40, () => e.active && e.clearTint()); }
+      if (e.hp <= 0) this.killEnemy(e);
+    }
+    killEnemy(e) {
+      this.addCombo();
+      this.score += e.score * this.multiplier(); this.explode(e.x, e.y, e.type === BOSS ? 3 : 1);
+      if (e.type === BOSS) { sfx.bigBoom(); sfx.musicDuck(false); } else sfx.boom();
+      if (e.type === BOSS) {
+        this.bossAlive = false; this.bossBar.setVisible(false); this.bossBarBg.setVisible(false);
+        this.cameras.main.shake(400, 0.01);
+        this.dropPower(e.x, e.y, this.lives < BALANCE.player.maxLives ? "p_life" : "p_gun");
+      } else if (this.dry >= BALANCE.power.pityAfter || Math.random() < BALANCE.power.dropChance) { this.dry = 0; this.dropPower(e.x, e.y); }
+      else this.dry++;
+      e.destroy(); this.drawHud();
+    }
+    escaped(e) {
+      // an escaped enemy costs a few combo points; a dodged diver costs nothing (dodging it is the point)
+      const C = BALANCE.combo;
+      if (!(e.type === DIVER && C.diverEscapeFree)) this.cutCombo(C.escapePenalty);
+      e.destroy();
+    }
+    ram(e) {
+      // ramming the boss hurts the player but must not delete the boss (in v1 it did, which froze the game)
+      if (e.type !== BOSS) { this.explode(e.x, e.y, 0.7); e.destroy(); }
+      this.damage();
+    }
+    dropPower(x, y, kind) {
+      const PW = BALANCE.power.weights, full = this.lives >= BALANCE.player.maxLives;
+      const k = kind || weighted([["p_gun", PW.p_gun + (full ? PW.p_life : 0)], ["p_shield", PW.p_shield], ["p_life", full ? 0 : PW.p_life]]);
+      const p = this.powers.create(x, y, ART, k); p.kind = k; p.setVelocityY(BALANCE.power.fallSpeed);
+      this.tweens.add({ targets: p, angle: 360, duration: 1600, repeat: -1 });
+    }
+    pickup(p) {
+      sfx.power();
+      if (p.kind === "p_gun") {
+        if (this.gun >= BALANCE.gun.maxLevel) { this.score += BALANCE.gun.maxedBonus; this.say("+" + BALANCE.gun.maxedBonus, "#ffc857"); }
+        else { this.gun++; this.say("SENJATA x" + this.gun, "#ffc857"); }
+      }
+      else if (p.kind === "p_shield") { this.shield = 1; this.say("PERISAI", "#5fe3ff"); }
+      else { this.lives = Math.min(BALANCE.player.maxLives, this.lives + 1); this.say("+1 NYAWA", "#ff4d3d"); }
+      p.destroy(); this.drawHud();
+    }
+    explode(x, y, scale) {
+      this.boomEmitter.explode(Math.round(14 * scale), x, y);
+      const b = this.add.sprite(x, y, ART, "boom_0").setScale(1.5 * scale).setDepth(6).play("boom");
+      b.once("animationcomplete", () => b.destroy());
+    }
+    damage() {
+      if (this.over || this.player.inv) return;
+      this.hitThisWave = true; this.breakCombo();
+      if (this.shield) {
+        this.shield = 0; sfx.hurt(); this.cameras.main.shake(120, 0.004);
+        this.player.inv = true; this.time.delayedCall(600, () => { this.player.inv = false; });
+        return;
+      }
+      this.lives--; sfx.hurt(); this.cameras.main.shake(250, 0.012); this.explode(this.player.x, this.player.y, 1.5);
+      this.gun = Math.max(1, this.gun - 1); this.drawHud();
+      if (this.lives <= 0) return this.gameOver();
+      this.player.inv = true; this.player.setAlpha(0.3);
+      this.tweens.add({ targets: this.player, alpha: 1, duration: 150, yoyo: true, repeat: Math.round(BALANCE.player.invulnMs / 300) - 1, onComplete: () => { this.player.setAlpha(1); this.player.inv = false; } });
+    }
+    enemyShot(x, y, vx, vy, frame) {
+      const s = this.eshots.get(x, y); if (!s) return;
+      s.setFrame(frame || "eshot").setActive(true).setVisible(true); s.body.enable = true; s.setVelocity(vx, vy);
+    }
+    gameOver() {
+      this.over = true; this.player.setVisible(false); sfx.musicStop(); sfx.gameOver(); this.thrust.stop(); this.physics.pause();
+      const best = Math.max(this.score, store.get("lm_best", 0)); store.set("lm_best", best);
+      const record = this.score >= best && this.score > 0;
+      this.pauseBtn.setVisible(false);
+      this.add.rectangle(W / 2, H / 2, W, H, 0x05060f, 0.72).setDepth(20);
+      txt(this, W / 2, 210, "PESAWAT JATUH", 42, "#ff4d3d").setDepth(21);
+      txt(this, W / 2, 290, "SKOR", 14, "#8e8aa3", MONO).setDepth(21);
+      const sc = txt(this, W / 2, 330, String(this.score), 56, "#f3ecdc").setDepth(21);
+      if (record) { txt(this, W / 2, 385, "REKOR BARU!", 20, "#ffc857").setDepth(21); this.tweens.add({ targets: sc, scale: 1.12, duration: 500, yoyo: true, repeat: -1 }); }
+      else txt(this, W / 2, 385, "Skor terbaik " + best, 18, "#ffc857", MONO).setDepth(21);
+      txt(this, W / 2, 425, "Gelombang " + this.wave + "  ·  Kombo tertinggi " + this.bestCombo, 13, "#8e8aa3", MONO).setDepth(21);
+      // buttons appear after a beat so a tap meant for the ship does not restart by accident
+      this.time.delayedCall(700, () => {
+        button(this, W / 2, 520, "MAIN LAGI", () => this.scene.restart(), { filled: true });
+        button(this, W / 2, 596, "MENU", () => this.scene.start("menu"));
+        this.input.keyboard.once("keydown-ENTER", () => this.scene.restart());
+      });
+    }
+
+    // ---- per frame ----
+    update(time, delta) {
+      const dt = delta / 1000;
+      if (!this.paused) this.sky(dt);
+      if (this.over || this.paused) return;
+      this.updatePlayer(time); this.cleanup(); this.updateEnemies(time, dt);
+      if (!this.inWave && !this.bossAlive && this.enemies.countActive() === 0 && !this.waitingNext) { this.waitingNext = true; this.waveCleared(); }
+    }
+    updatePlayer(time) {
+      const k = this.keys, p = this.player, sp = BALANCE.player.speed, G = BALANCE.gun;
+      let vx = 0, vy = 0;
+      if (k.left.isDown || k.a.isDown) vx = -sp; if (k.right.isDown || k.d.isDown) vx = sp;
+      if (k.up.isDown || k.w.isDown) vy = -sp; if (k.down.isDown || k.s.isDown) vy = sp;
+      p.setVelocity(vx, vy); if (p.y < BALANCE.player.minY) p.y = BALANCE.player.minY;
+      this.shieldRing.setVisible(!!this.shield).setPosition(p.x, p.y);
+      // fire: keyboard space, or always while touching / on touch devices
+      // auto-fire only once the player has actually used touch (touchscreen laptops played by keyboard stay manual)
+      const wantFire = k.space.isDown || this.touch || touchUsed;
+      if (wantFire && time > this.lastShot + (this.gun >= G.maxLevel ? G.fireMsMax : G.fireMs)) {
+        this.lastShot = time; sfx.shoot();
+        const offs = this.gun === 1 ? [0] : this.gun === 2 ? [-9, 9] : [-12, 0, 12];
+        for (const o of offs) { const s = this.shots.get(p.x + o, p.y - 24); if (s) { s.setActive(true).setVisible(true).setVelocityY(-G.shotSpeed); s.body.enable = true; } }
+      }
+    }
+    cleanup() {
+      this.shots.children.each(s => { if (s.active && s.y < -20) { this.shots.killAndHide(s); s.body.enable = false; } });
+      this.eshots.children.each(s => { if (s.active && (s.y > H + 20 || s.y < -40 || s.x < -20 || s.x > W + 20)) s.destroy(); });
+      this.powers.children.each(s => { if (s.y > H + 20) s.destroy(); });
+    }
+    updateEnemies(time, dt) {
+      const E = BALANCE.enemy;
+      this.enemies.children.each(e => {
+        e.t += dt;
+        if (e.type === BOSS) return this.updateBoss(e, time);
+        if (e.type === DIVER) return this.updateDiver(e, time);
+        if (e.pattern === 1) e.x = e.baseX + (e.baseX < W / 2 ? 1 : -1) * Math.min(W - 80, e.t * 120);
+        else if (e.pattern === 2) e.x = e.baseX + Math.sin(e.t * 2.2) * 110;
+        else e.x = e.baseX + Math.sin(e.t * 1.4) * 40;
+        if (e.type >= 2 && time > e.fireAt && e.y > 0 && e.y < H - 200) {
+          e.fireAt = time + Phaser.Math.Between(E.fireMinMs, E.fireMaxMs);
+          const ang = Phaser.Math.Angle.Between(e.x, e.y, this.player.x, this.player.y);
+          const v = E.shotSpeed + Math.min(E.shotSpeedWaveMax, this.wave * E.shotSpeedPerWave);
+          this.enemyShot(e.x, e.y + 10, Math.cos(ang) * v, Math.sin(ang) * v);
+        }
+        if (e.y > H + 40) this.escaped(e);
+      });
+    }
+    updateDiver(e, time) {
+      const D = BALANCE.diver;
+      if (e.state === "descend" && e.y >= D.stopY) {
+        e.state = "warn"; e.warnUntil = time + D.warnMs; e.setVelocity(0, 0); sfx.warn();
+      } else if (e.state === "warn") {
+        e.setFrame(Math.floor(time / 80) % 2 ? "penyelam_warn" : "penyelam");
+        if (time >= e.warnUntil) {
+          e.state = "dive";
+          const ang = Phaser.Math.Angle.Between(e.x, e.y, this.player.x, this.player.y);
+          e.setFrame("penyelam_dive").setRotation(ang - Math.PI / 2).setVelocity(Math.cos(ang) * D.diveSpeed, Math.sin(ang) * D.diveSpeed);
+        }
+      }
+      if (e.y > H + 40 || e.x < -40 || e.x > W + 40) this.escaped(e);
+    }
+    updateBoss(e, time) {
+      const BS = BALANCE.boss;
+      e.x = W / 2 + Math.sin(e.t * 0.9) * 150;
+      // frame: white flash when hit, otherwise alternate with the red rage frame below 50% HP
+      e.setFrame(time < (e.flashUntil || 0) ? "boss_hit" : e.rage && Math.floor(time / 120) % 2 ? "boss_rage" : "boss");
+      if (time <= e.fireAt) return;
+      const gap = Math.max(BS.fireMsMin, BS.fireMs - this.wave * BS.fireCutPerWave) * (e.rage ? BS.rageFireMul : 1);
+      e.fireAt = time + gap; e.shotsFired++;
+      if (e.k >= BS.ringFromBoss && e.shotsFired % BS.ringEvery === 0) {
+        for (let i = 0; i < BS.ringBullets; i++) {
+          const a = (i / BS.ringBullets) * Math.PI * 2 + e.t;
+          this.enemyShot(e.x, e.y + 10, Math.cos(a) * BS.ringSpeed, Math.sin(a) * BS.ringSpeed, "eshot_ring");
+        }
+      } else {
+        for (let a = -2; a <= 2; a++) this.enemyShot(e.x + a * 20, e.y + 30, a * 70, BS.shotSpeed + this.wave * BS.shotSpeedPerWave, "eshot_boss");
+      }
+    }
+  }
+
+  // ================= 7. game =================
+  const game = window.__g = new Phaser.Game({
+    type: Phaser.AUTO, parent: "game", width: W, height: H, backgroundColor: C.sky, roundPixels: true,
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+    physics: { default: "arcade", arcade: { debug: false } },
+    scene: [Boot, Menu, Play],
+  });
+  document.fonts && document.fonts.ready.then(() => { const m = game.scene.getScene("menu"); if (m && m.scene.isActive()) m.scene.restart(); });
+})();
+</script>
+</body>
+</html>
